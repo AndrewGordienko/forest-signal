@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+data/registered.json
+data/rasters/*
+!data/rasters/algonquin/
+!data/rasters/madre/
+!data/rasters/kalimantan/
+src/assets/
+public/icons.svg
+*.egg-info/

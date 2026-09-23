@@ -1,0 +1,12 @@
+.venv
+node_modules
+dist
+.git
+.pytest_cache
+**/__pycache__
+*.pyc
+data/registered.json
+data/rasters/*
+!data/rasters/algonquin/
+!data/rasters/madre/
+!data/rasters/kalimantan/
