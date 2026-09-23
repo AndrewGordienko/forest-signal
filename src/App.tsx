@@ -873,7 +873,12 @@ export default function App() {
                   {result
                     ? auditAgree === 9
                       ? "Stable verdict"
-                      : 9 - auditAgree + " settings change the verdict"
+                      : 9 -
+                        auditAgree +
+                        (9 - auditAgree === 1
+                          ? " setting changes"
+                          : " settings change") +
+                        " the verdict"
                     : "Checking stability"}
                 </strong>
                 <p>
