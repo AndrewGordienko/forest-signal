@@ -6,6 +6,7 @@ import {
   TileLayer,
   Tooltip,
   useMap,
+  ZoomControl,
 } from "react-leaflet";
 import TrendChart from "./TrendChart";
 import { analyzeStatic, loadStaticSites, STATIC_MODE } from "./staticAnalysis";
@@ -568,10 +569,11 @@ export default function App() {
                 <MapContainer
                   center={site.center as LatLngExpression}
                   zoom={10}
-                  zoomControl={true}
+                  zoomControl={false}
                   className="map"
                 >
                   <FlyTo site={site} />
+                  <ZoomControl position="bottomright" />
                   {base === "satellite" ? (
                     <TileLayer
                       attribution="Tiles © Esri, Maxar, Earthstar Geographics"
@@ -1003,9 +1005,9 @@ export default function App() {
                 <span>
                   <strong>Geospatial delivery</strong>
                   <small>
-                    The Python API builds a grid, clips an optional GeoJSON
-                    polygon, aggregates area-weighted statistics, and exports
-                    cell-level results.
+                    {STATIC_MODE
+                      ? "The public preview replays GeoTIFF-derived data in the browser. The repository contains the Python raster API."
+                      : "The Python API clips GeoJSON areas, aggregates raster statistics, and returns inspectable cells."}
                   </small>
                 </span>
               </div>
