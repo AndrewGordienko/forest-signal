@@ -2,7 +2,7 @@
 
 **Live demo:** https://andrewgordienko.github.io/forest-signal/ · **Source:** https://github.com/AndrewGordienko/forest-signal
 
-A small, complete geospatial change-analysis service built as an independent interview project by Andrew Gordienko. It turns the question from his Chloris correspondence—*when does uncertainty change the conclusion about biomass gain or loss?*—into a reproducible raster workflow, API, and review interface.
+A geospatial case study and analysis service built as an independent interview project by Andrew Gordienko. Its thesis: **a biomass change estimate becomes useful when a reviewer can see whether it supports a decision, where that support comes from, and which assumptions could reverse it.** The article leads a reader through the estimate, the spatial evidence, and a nine-scenario decision check. Its figures run on a reproducible raster workflow and API.
 
 **The bundled study areas are synthetic.** Their 30 m GeoTIFFs exist to exercise the pipeline. No displayed biomass estimate is a Chloris observation, and the illustrative covariance settings are not calibrated for carbon accounting.
 
@@ -29,11 +29,11 @@ Open **http://127.0.0.1:8014**. Docker is also supported: `docker build -t fores
 
 ## Five-minute review path
 
-1. Start on Algonquin, 2018 → 2025, 95% confidence. The mean change is positive, but the site interval crosses zero while individual display blocks have clear gain or loss.
-2. Click a colored map block to inspect its start/end stock, change, standard error, and standardized change.
-3. Switch among **Significant change**, **Raw change**, and **Uncertainty**. Then change 95% to 80% to see how the classified area moves.
-4. Switch to Madre de Dios, then open **Decision stability**. The default 95% model reports net loss, while the independent-year 95% scenario is inconclusive; the nine cases expose sensitivity to an assumption.
-5. Upload a GeoJSON Polygon within the sample landscape. The API masks the 30 m rasters and recomputes all statistics. Export the resulting block-level CSV.
+1. Start on Madre de Dios, 2018 → 2025, 95% confidence. The area-wide interval supports net loss under the baseline error assumption.
+2. In the map, switch between **Raw difference** and **After uncertainty**. Click a block to inspect its estimate and standard error.
+3. In the decision check, select **Independent / 95%**. The same mean change becomes inconclusive when the paired-error assumption changes.
+4. Switch to Algonquin, where local gain and loss coexist with an inconclusive area-wide verdict. Switch to Kalimantan, where net gain survives all nine settings.
+5. Upload a GeoJSON Polygon within a sample landscape. The API masks the 30 m rasters and recomputes statistics; the cell CSV exports the result.
 
 ## What is engineered here
 

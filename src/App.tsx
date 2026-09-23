@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MapContainer,
   Polygon,
@@ -8,32 +8,22 @@ import {
   useMap,
   ZoomControl,
 } from "react-leaflet";
-import TrendChart from "./TrendChart";
-import { analyzeStatic, loadStaticSites, STATIC_MODE } from "./staticAnalysis";
+import type { LatLngExpression } from "leaflet";
 import {
-  Activity,
-  ArrowDownRight,
   ArrowRight,
-  ArrowUpRight,
-  Check,
-  ChevronDown,
-  CircleHelp,
   Download,
-  FileJson,
-  Layers3,
-  MapPin,
-  RotateCcw,
+  ExternalLink,
+  Info,
   Satellite,
-  SlidersHorizontal,
   Upload,
   X,
 } from "lucide-react";
-import type { LatLngExpression } from "leaflet";
+import TrendChart from "./TrendChart";
+import { analyzeStatic, loadStaticSites, STATIC_MODE } from "./staticAnalysis";
 import "leaflet/dist/leaflet.css";
 import "./App.css";
 
-type Class = "gain" | "loss" | "uncertain";
-type Layer = "signal" | "raw" | "uncertainty";
+type Kind = "gain" | "loss" | "uncertain";
 type Site = {
   id: string;
   name: string;
@@ -42,7 +32,7 @@ type Site = {
   bounds: [[number, number], [number, number]];
   color: string;
   story: string;
-  dataKind?: "synthetic" | "imported";
+  dataKind?: string;
 };
 type Cell = {
   id: string;
@@ -55,516 +45,607 @@ type Cell = {
   delta: number;
   changeSe: number;
   score: number;
-  classification: Class;
+  classification: Kind;
+};
+type Scenario = {
+  temporalCorrelation: number;
+  confidence: number;
+  siteDirection: Kind;
+  classifiedAreaHa: number;
+  interval: [number, number];
 };
 type Result = {
-  decisionAudit: {
-    temporalCorrelation: number;
-    confidence: number;
-    siteDirection: Class;
-    classifiedAreaHa: number;
-    interval: [number, number];
-  }[];
   site: string;
   start: number;
   end: number;
   confidence: number;
   cells: Cell[];
-  series: { year: number; stock: number }[];
+  series: { year: number; stock: number | null }[];
+  decisionAudit: Scenario[];
   summary: {
     areaHa: number;
     meanChange: number;
     siteInterval: [number, number];
-    siteDirection: Class;
-    classAreaHa: Record<Class, number>;
+    siteDirection: Kind;
+    classAreaHa: Record<Kind, number>;
     cellCount: number;
     sourcePixelCount: number;
   };
 };
-const defaults: Site[] = [
-  {
-    id: "algonquin",
-    name: "Algonquin landscape",
-    region: "Ontario, Canada",
-    center: [45.65, -78.43],
-    bounds: [
-      [45.52, -78.65],
-      [45.79, -78.2],
-    ],
-    color: "#bddc88",
-    story:
-      "Mixed forest with a localized disturbance and a broader, modest gain signal.",
-  },
+const examples: Site[] = [
   {
     id: "madre",
-    name: "Madre de Dios landscape",
+    name: "Madre de Dios",
     region: "Peru",
     center: [-12.82, -69.48],
     bounds: [
       [-12.98, -69.7],
       [-12.66, -69.26],
     ],
-    color: "#e2bd85",
-    story: "Tropical forest with a clearing corridor and broader degradation.",
+    color: "#d88773",
+    story: "Loss, with one assumption-sensitive verdict",
+  },
+  {
+    id: "algonquin",
+    name: "Algonquin",
+    region: "Canada",
+    center: [45.65, -78.43],
+    bounds: [
+      [45.52, -78.65],
+      [45.79, -78.2],
+    ],
+    color: "#c4a76d",
+    story: "Local change, uncertain overall direction",
   },
   {
     id: "kalimantan",
-    name: "Kalimantan landscape",
+    name: "Kalimantan",
     region: "Indonesia",
     center: [0.36, 115.36],
     bounds: [
       [0.2, 115.16],
       [0.52, 115.56],
     ],
-    color: "#91c8bb",
-    story: "Tropical forest with patchy loss alongside broad recovery.",
+    color: "#6aaf91",
+    story: "Gain that survives every tested setting",
   },
 ];
-const fmt = (n: number, d = 0) =>
+const fmt = (n: number, digits = 0) =>
   n.toLocaleString("en-US", {
-    minimumFractionDigits: d,
-    maximumFractionDigits: d,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   });
-const sign = (n: number, d = 1) => (n > 0 ? "+" : "") + fmt(n, d);
-function FlyTo({ site }: { site: Site }) {
+const sign = (n: number, digits = 1) => `${n > 0 ? "+" : ""}${fmt(n, digits)}`;
+const verdict = (kind: Kind) =>
+  kind === "uncertain" ? "Inconclusive" : `Net ${kind}`;
+const pairing = (rho: number) =>
+  rho === 0 ? "Independent" : rho === 0.45 ? "Baseline" : "Strongly paired";
+function FlyTo({ site, cells }: { site: Site; cells?: Cell[] }) {
   const map = useMap();
   useEffect(() => {
-    map.fitBounds(site.bounds, { padding: [35, 35], animate: true });
-  }, [map, site]);
+    if (!cells?.length) {
+      map.fitBounds(site.bounds, { padding: [25, 25], animate: false });
+      return;
+    }
+    const south = Math.min(...cells.map((cell) => cell.bounds[0][0]));
+    const west = Math.min(...cells.map((cell) => cell.bounds[0][1]));
+    const north = Math.max(...cells.map((cell) => cell.bounds[1][0]));
+    const east = Math.max(...cells.map((cell) => cell.bounds[1][1]));
+    map.fitBounds(
+      [
+        [south, west],
+        [north, east],
+      ],
+      {
+        padding: [30, 30],
+        animate: true,
+      },
+    );
+  }, [map, site, cells]);
   return null;
 }
-function cellColor(c: Cell, l: Layer) {
-  if (l === "signal")
-    return c.classification === "gain"
-      ? "#9ed478"
-      : c.classification === "loss"
-        ? "#f17e66"
-        : "#efdeb2";
-  if (l === "uncertainty")
-    return c.changeSe > 18
-      ? "#e97b65"
-      : c.changeSe > 15
-        ? "#eabf80"
-        : "#a5d8ab";
-  return c.delta < -32
-    ? "#dc6e62"
-    : c.delta < -12
-      ? "#eaa48a"
-      : c.delta < 4
-        ? "#eee0b8"
-        : c.delta < 18
-          ? "#bfdb91"
-          : "#78bda3";
+function cellColor(cell: Cell, layer: "raw" | "classified") {
+  if (layer === "classified")
+    return cell.classification === "gain"
+      ? "#68b694"
+      : cell.classification === "loss"
+        ? "#e27661"
+        : "#dec894";
+  return cell.delta < -32
+    ? "#c95951"
+    : cell.delta < -12
+      ? "#df8e73"
+      : cell.delta < 4
+        ? "#e3d6ae"
+        : cell.delta < 18
+          ? "#a8c897"
+          : "#5daa90";
 }
-function download(result: Result) {
-  const lines = [
+function exportCsv(result: Result) {
+  const rows = [
     "cell_id,lat,lon,area_ha,start_t_ha,end_t_ha,change_t_ha,change_se_t_ha,z_score,class",
-    ...result.cells.map((c) =>
+    ...result.cells.map((cell) =>
       [
-        c.id,
-        c.lat,
-        c.lon,
-        c.areaHa.toFixed(2),
-        c.startStock,
-        c.endStock,
-        c.delta,
-        c.changeSe,
-        c.score,
-        c.classification,
+        cell.id,
+        cell.lat,
+        cell.lon,
+        cell.areaHa,
+        cell.startStock,
+        cell.endStock,
+        cell.delta,
+        cell.changeSe,
+        cell.score,
+        cell.classification,
       ].join(","),
     ),
   ];
   const url = URL.createObjectURL(
-    new Blob([lines.join("\n")], { type: "text/csv" }),
+    new Blob([rows.join("\n")], { type: "text/csv" }),
   );
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "forest-signal-" + result.site + ".csv";
-  a.click();
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `forest-signal-${result.site}-${result.start}-${result.end}.csv`;
+  anchor.click();
   URL.revokeObjectURL(url);
 }
+
 export default function App() {
-  const [sites, setSites] = useState(defaults),
-    [siteId, setSiteId] = useState("algonquin"),
-    [start, setStart] = useState(2018),
-    [end, setEnd] = useState(2025),
-    [confidence, setConfidence] = useState(95);
-  const [layer, setLayer] = useState<Layer>("signal"),
-    [base, setBase] = useState<"satellite" | "street">("satellite"),
-    [result, setResult] = useState<Result | null>(null);
-  const [selected, setSelected] = useState<string | null>(null),
-    [polygon, setPolygon] = useState<object | null>(null),
-    [polygonName, setPolygonName] = useState(""),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [notes, setNotes] = useState(false);
-  const file = useRef<HTMLInputElement>(null),
-    seq = useRef(0);
-  const site = sites.find((s) => s.id === siteId) || sites[0],
-    cell = useMemo(
-      () => result?.cells.find((c) => c.id === selected),
-      [result, selected],
-    );
+  const [sites, setSites] = useState(examples);
+  const [siteId, setSiteId] = useState("madre");
+  const [start, setStart] = useState(2018);
+  const [end, setEnd] = useState(2025);
+  const [confidence, setConfidence] = useState(95);
+  const [layer, setLayer] = useState<"raw" | "classified">("classified");
+  const [base, setBase] = useState<"satellite" | "street">("satellite");
+  const [result, setResult] = useState<Result | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [focus, setFocus] = useState<[number, number]>([0, 95]);
+  const [polygon, setPolygon] = useState<object | null>(null);
+  const [polygonName, setPolygonName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notes, setNotes] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const requestId = useRef(0);
+  const site = sites.find((item) => item.id === siteId) ?? examples[0];
+  const visible =
+    result?.site === siteId &&
+    result.start === start &&
+    result.end === end &&
+    result.confidence === confidence
+      ? result
+      : null;
+  const cell = visible?.cells.find((item) => item.id === selectedId);
+  const rawLossArea =
+    visible?.cells.reduce(
+      (sum, item) => sum + (item.delta < 0 ? item.areaHa : 0),
+      0,
+    ) ?? 0;
+  const rawGainArea =
+    visible?.cells.reduce(
+      (sum, item) => sum + (item.delta >= 0 ? item.areaHa : 0),
+      0,
+    ) ?? 0;
+  const areaRows: { kind: Kind; label: string; area: number }[] =
+    layer === "raw"
+      ? [
+          { kind: "loss", label: "Estimated decrease", area: rawLossArea },
+          { kind: "gain", label: "Estimated increase", area: rawGainArea },
+        ]
+      : (["loss", "uncertain", "gain"] as Kind[]).map((kind) => ({
+          kind,
+          label: kind === "uncertain" ? "Unresolved" : kind,
+          area: visible?.summary.classAreaHa[kind] ?? 0,
+        }));
+  const scenario = visible?.decisionAudit.find(
+    (item) =>
+      item.temporalCorrelation === focus[0] && item.confidence === focus[1],
+  );
+  const baseline = visible?.decisionAudit.find(
+    (item) =>
+      item.temporalCorrelation === 0.45 && item.confidence === confidence,
+  );
+  const agree =
+    visible?.decisionAudit.filter(
+      (item) => item.siteDirection === visible.summary.siteDirection,
+    ).length ?? 0;
+  const boundary = polygon
+    ? (polygon as { coordinates: number[][][] }).coordinates?.[0]?.map(
+        (point) => [point[1], point[0]] as [number, number],
+      )
+    : null;
   useEffect(() => {
     (STATIC_MODE
       ? loadStaticSites()
       : fetch("/api/sites")
-          .then((r) => r.json())
-          .then((d) => d.sites)
+          .then((response) => response.json())
+          .then((data) => data.sites)
     )
-      .then((d) => {
-        if (Array.isArray(d)) setSites(d);
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const known = examples.map((item) => ({
+            ...data.find((remote: Site) => remote.id === item.id),
+            ...item,
+          }));
+          const imported = data.filter(
+            (remote: Site) => !examples.some((item) => item.id === remote.id),
+          );
+          setSites([...known, ...imported]);
+        }
       })
-      .catch((e) => setError(e.message));
+      .catch((cause) => setError(cause.message));
   }, []);
   useEffect(() => {
-    const id = ++seq.current;
+    const id = ++requestId.current;
     const timer = setTimeout(() => {
       setBusy(true);
       setError("");
-      return (
-        STATIC_MODE
-          ? analyzeStatic({ site: siteId, start, end, confidence, polygon })
-          : fetch("/api/analyze", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                site: siteId,
-                start,
-                end,
-                confidence,
-                polygon,
-              }),
-            }).then(async (r) => {
-              const d = await r.json();
-              if (!r.ok) throw Error(d.detail || d.error || "Analysis failed");
-              return d as Result;
-            })
+      (STATIC_MODE
+        ? analyzeStatic({ site: siteId, start, end, confidence, polygon })
+        : fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              site: siteId,
+              start,
+              end,
+              confidence,
+              polygon,
+            }),
+          }).then(async (response) => {
+            const data = await response.json();
+            if (!response.ok) throw Error(data.detail || "Analysis failed");
+            return data as Result;
+          })
       )
-        .then((d) => {
-          if (id === seq.current) {
-            setResult(d as Result);
-            setSelected(null);
+        .then((data) => {
+          if (id === requestId.current) {
+            setResult(data as Result);
+            setSelectedId(null);
           }
         })
-        .catch((e) => {
-          if (id === seq.current) setError(e.message);
+        .catch((cause) => {
+          if (id === requestId.current) setError(cause.message);
         })
         .finally(() => {
-          if (id === seq.current) setBusy(false);
+          if (id === requestId.current) setBusy(false);
         });
-    }, 100);
+    }, 80);
     return () => clearTimeout(timer);
   }, [siteId, start, end, confidence, polygon]);
-  const changeSite = (id: string) => {
+  function chooseSite(id: string) {
     setSiteId(id);
     setPolygon(null);
     setPolygonName("");
-  };
-  const reset = () => {
-    setStart(2018);
-    setEnd(2025);
-    setConfidence(95);
-    setLayer("signal");
-    setPolygon(null);
-    setPolygonName("");
-  };
-  const upload = async (f?: File) => {
-    if (!f) return;
+    setSelectedId(null);
+    setFocus([0, 95]);
+  }
+  async function upload(file?: File) {
+    if (!file) return;
     try {
-      const j = JSON.parse(await f.text());
-      const x =
-        j.type === "FeatureCollection"
-          ? j.features?.[0]?.geometry
-          : j.type === "Feature"
-            ? j.geometry
-            : j;
-      if (x?.type !== "Polygon") throw Error("Choose a GeoJSON Polygon.");
-      setPolygon(x);
-      setPolygonName(f.name);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read GeoJSON");
+      const json = JSON.parse(await file.text());
+      const geometry =
+        json.type === "FeatureCollection"
+          ? json.features?.[0]?.geometry
+          : json.type === "Feature"
+            ? json.geometry
+            : json;
+      if (geometry?.type !== "Polygon")
+        throw Error("Choose a GeoJSON Polygon.");
+      setPolygon(geometry);
+      setPolygonName(file.name);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not read GeoJSON",
+      );
     }
-  };
-  const boundary = polygon
-    ? (polygon as { coordinates: number[][][] }).coordinates?.[0]?.map(
-        (p) => [p[1], p[0]] as [number, number],
-      )
-    : null;
-  const auditAgree =
-    result?.decisionAudit.filter(
-      (a) => a.siteDirection === result.summary.siteDirection,
-    ).length ?? 0;
-  const auditAreas = result?.decisionAudit.map((a) => a.classifiedAreaHa) ?? [];
-  const classified = result
-    ? result.summary.classAreaHa.gain + result.summary.classAreaHa.loss
-    : 0;
+  }
+  const mean = visible?.summary.meanChange ?? 0;
+  const interval = visible?.summary.siteInterval ?? [-1, 1];
+  const scaleMin = Math.min(interval[0], 0) - 5;
+  const scaleMax = Math.max(interval[1], 0) + 5;
+  const onScale = (value: number) =>
+    `${((value - scaleMin) / (scaleMax - scaleMin)) * 100}%`;
+
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon">
-            <span />
-            <span />
-            <span />
+    <div className="page">
+      <header className="site-header">
+        <a className="wordmark" href="#top">
+          <span className="mark">
+            <i />
+            <i />
+            <i />
+            <i />
+          </span>
+          <span>
+            forest<span className="wordmark-light">signal</span>
+          </span>
+        </a>
+        <nav aria-label="Page sections">
+          <a href="#observation">01 / Observation</a>
+          <a href="#map">02 / The map</a>
+          <a href="#sensitivity">03 / Sensitivity</a>
+        </nav>
+        <a
+          className="source-link"
+          href="https://github.com/AndrewGordienko/forest-signal"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Source <ExternalLink size={14} />
+        </a>
+      </header>
+      <main id="top">
+        <section className="hero article-width">
+          <div className="hero-meta">
+            <span className="live-dot" /> INTERACTIVE CASE STUDY{" "}
+            <span className="meta-separator">/</span> FOREST BIOMASS
           </div>
-          <div>
-            <strong>fieldnote</strong>
-            <small>GEOSPATIAL LAB</small>
-          </div>
-        </div>
-        <div className="side-block">
-          <div className="side-label">WORKSPACE</div>
-          <button className="side-link active">
-            <Activity size={17} /> Change analysis <i />
-          </button>
-          <button
-            className="side-link"
-            onClick={() =>
-              document
-                .getElementById("landscapes")
-                ?.scrollIntoView({ behavior: "smooth" })
-            }
-          >
-            <Layers3 size={17} /> Landscapes
-          </button>
-          <button className="side-link" onClick={() => setNotes(true)}>
-            <CircleHelp size={17} /> Method notes
-          </button>
-        </div>
-        <div className="side-block" id="landscapes">
-          <div className="side-label">SAMPLE LANDSCAPES</div>
-          {sites.map((s) => (
-            <button
-              className={"site-link " + (siteId === s.id ? "selected" : "")}
-              key={s.id}
-              onClick={() => changeSite(s.id)}
-            >
-              <span className="site-swatch" style={{ background: s.color }} />
-              <span>
-                <strong>{s.name}</strong>
-                <small>{s.region}</small>
-              </span>
-              {siteId === s.id && <ArrowRight size={14} />}
-            </button>
-          ))}
-        </div>
-        <div className="side-bottom">
-          <div>
-            <i /> SAMPLE DATASET <span>v1.0</span>
-          </div>
-          <p>
-            Independent portfolio demo by Andrew Gordienko. Not affiliated with
-            Chloris.
+          <h1>
+            Did this forest <em>actually</em> change?
+          </h1>
+          <p className="hero-deck">
+            A measured difference is easy to map. Deciding whether it is
+            meaningful takes one more step. Explore three synthetic landscapes
+            and see where uncertainty changes the call.
           </p>
-        </div>
-      </aside>
-      <main>
-        <header className="topbar">
-          <div className="crumbs">
-            Workspace <span>/</span> Analysis <span>/</span> <b>{site.name}</b>
-          </div>
-          <div className="top-right">
-            <span className="data-pill">
-              <i />{" "}
-              {site.dataKind === "imported"
-                ? "IMPORTED RASTERS"
-                : "SYNTHETIC DATA"}
+          <div className="byline">
+            <span className="author-avatar">AG</span>
+            <span>
+              Andrew Gordienko{" "}
+              <small>Geospatial engineering portfolio · September 2026</small>
             </span>
-            <button
-              className="icon-btn"
-              onClick={() => setNotes(true)}
-              aria-label="Method notes"
-            >
-              <CircleHelp size={18} />
-            </button>
-            <div className="avatar">AG</div>
+            <span className="byline-rule" />
+            <span className="synthetic-label">SYNTHETIC GEOTIFF DATA</span>
           </div>
-        </header>
-        <div className="content">
-          <div className="intro">
+        </section>
+        <section className="lab-shell" aria-label="Interactive analysis">
+          <div className="lab-header">
             <div>
-              <div className="eyebrow">
-                <i /> FOREST INTELLIGENCE / 01
-              </div>
-              <h1>
-                Where did the forest <em>really</em> change?
-              </h1>
-              <p>
-                Separate biomass movement from measurement uncertainty, then
-                inspect the cells driving the result.
-              </p>
+              <span className="section-number">THE LIVE ANALYSIS</span>
+              <h2>Choose a landscape.</h2>
             </div>
-            <button
-              className="outline-btn"
-              disabled={!result}
-              onClick={() => result && download(result)}
-            >
-              <Download size={16} /> Export analysis
-            </button>
+            <span className="lab-status">
+              <span className="live-dot" />{" "}
+              {busy ? "RECALCULATING" : "READY TO EXPLORE"}
+            </span>
           </div>
-          <div className="toolbar">
-            <div className="control landscape-control">
-              <label>LANDSCAPE</label>
-              <div className="select-field">
-                <MapPin size={16} />
-                <select
-                  value={siteId}
-                  onChange={(e) => changeSite(e.target.value)}
-                >
-                  {sites.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={15} />
-              </div>
-            </div>
-            <div className="divider" />
-            <div className="control">
-              <label>COMPARE YEARS</label>
-              <div className="years">
-                <select
-                  value={start}
-                  onChange={(e) => setStart(Math.min(+e.target.value, end - 1))}
-                >
-                  {[2018, 2019, 2020, 2021, 2022, 2023, 2024].map((y) => (
-                    <option key={y}>{y}</option>
-                  ))}
-                </select>
-                <ArrowRight size={15} />
-                <select
-                  value={end}
-                  onChange={(e) => setEnd(Math.max(+e.target.value, start + 1))}
-                >
-                  {[2019, 2020, 2021, 2022, 2023, 2024, 2025].map((y) => (
-                    <option key={y}>{y}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="divider" />
-            <div className="control">
-              <label>CONFIDENCE LEVEL</label>
-              <div className="segments">
-                {[80, 90, 95].map((c) => (
-                  <button
-                    key={c}
-                    className={confidence === c ? "chosen" : ""}
-                    onClick={() => setConfidence(c)}
-                  >
-                    {c}%
-                  </button>
+          <div className="site-picker">
+            {sites.map((item, index) => (
+              <button
+                className={`site-card ${siteId === item.id ? "selected" : ""}`}
+                key={item.id}
+                onClick={() => chooseSite(item.id)}
+                aria-pressed={siteId === item.id}
+              >
+                <span className="site-card-top">
+                  <span className="site-index">0{index + 1}</span>
+                  <span
+                    className="site-dot"
+                    style={{ background: item.color }}
+                  />
+                </span>
+                <strong>{item.name}</strong>
+                <small>{item.region}</small>
+                <span className="site-story">{item.story}</span>
+                <span className="site-card-arrow">
+                  <ArrowRight size={16} />
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="controls">
+            <div className="control-title">COMPARE OBSERVATIONS</div>
+            <label>
+              From{" "}
+              <select
+                value={start}
+                onChange={(event) =>
+                  setStart(Math.min(+event.target.value, end - 1))
+                }
+              >
+                {[2018, 2019, 2020, 2021, 2022, 2023, 2024].map((year) => (
+                  <option key={year}>{year}</option>
                 ))}
-              </div>
-            </div>
-            <button className="reset" onClick={reset}>
-              <RotateCcw size={15} /> Reset
-            </button>
+              </select>
+            </label>
+            <ArrowRight size={16} className="control-arrow" />
+            <label>
+              To{" "}
+              <select
+                value={end}
+                onChange={(event) =>
+                  setEnd(Math.max(+event.target.value, start + 1))
+                }
+              >
+                {[2019, 2020, 2021, 2022, 2023, 2024, 2025].map((year) => (
+                  <option key={year}>{year}</option>
+                ))}
+              </select>
+            </label>
+            <div className="control-spacer" />
+            <label className="confidence-label">
+              Confidence{" "}
+              <select
+                value={confidence}
+                onChange={(event) => setConfidence(+event.target.value)}
+              >
+                {[80, 90, 95].map((level) => (
+                  <option key={level} value={level}>
+                    {level}%
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           {error && (
-            <div className="error">
+            <div className="error" role="alert">
               {error}
-              <button onClick={() => setError("")}>
-                <X size={15} />
+              <button onClick={() => setError("")} aria-label="Dismiss error">
+                <X size={16} />
               </button>
             </div>
           )}
-          <section className="metrics">
-            <div className="metric">
-              <div className="metric-label">
-                MEAN BIOMASS CHANGE <Activity size={16} />
+        </section>
+        <section className="chapter article-width" id="observation">
+          <div className="chapter-heading">
+            <span className="chapter-index">01</span>
+            <div>
+              <span className="section-number">THE OBSERVATION</span>
+              <h2>
+                The average moved. How much of that movement can we trust?
+              </h2>
+            </div>
+          </div>
+          <p className="chapter-intro">
+            Across {site.name}, the mean biomass estimate changed by{" "}
+            <strong>
+              {visible ? `${sign(mean)} tonnes per hectare` : "—"}
+            </strong>{" "}
+            between {start} and {end}. The interval includes uncertainty from
+            both observations and shared regional error.
+          </p>
+          <div className="observation-grid">
+            <div className="figure-panel interval-panel">
+              <div className="figure-top">
+                <span>FIGURE 1 / ESTIMATED CHANGE</span>
+                <span>t/ha</span>
               </div>
-              <div className="metric-number">
-                {result ? sign(result.summary.meanChange) : "—"}{" "}
+              <div className="change-number">
+                <span className={mean < 0 ? "negative" : "positive"}>
+                  {visible ? sign(mean) : "—"}
+                </span>
                 <small>t/ha</small>
               </div>
-              <p>
-                {result
-                  ? result.start + " → " + result.end + " across selected area"
-                  : "Loading analysis"}
-              </p>
-            </div>
-            <div className="metric">
-              <div className="metric-label">
-                CHANGE INTERVAL <SlidersHorizontal size={16} />
-              </div>
-              <div className="metric-number interval">
-                {result
-                  ? sign(result.summary.siteInterval[0]) +
-                    " to " +
-                    sign(result.summary.siteInterval[1])
-                  : "—"}
-              </div>
-              <p>{confidence}% interval · t/ha · illustrative model</p>
-            </div>
-            <div className="metric">
-              <div className="metric-label">
-                CLASSIFIED AREA <Layers3 size={16} />
-              </div>
-              <div className="metric-number">
-                {result
-                  ? Math.round((classified / result.summary.areaHa) * 100) + "%"
-                  : "—"}
-              </div>
-              <p>
-                {result
-                  ? fmt(classified) +
-                    " of " +
-                    fmt(result.summary.areaHa) +
-                    " ha"
-                  : "Gain or loss above threshold"}
-              </p>
-            </div>
-            <div className="metric verdict">
-              <div className="metric-label">
-                LANDSCAPE VERDICT <span>✳</span>
-              </div>
               <div
-                className={
-                  "metric-number " + (result?.summary.siteDirection || "")
+                className="interval-chart"
+                aria-label={
+                  visible
+                    ? `${confidence}% interval from ${interval[0]} to ${interval[1]} tonnes per hectare`
+                    : "Loading interval"
                 }
               >
-                {result
-                  ? result.summary.siteDirection === "uncertain"
-                    ? "Inconclusive"
-                    : "Net " + result.summary.siteDirection
-                  : "—"}
-              </div>
-              <p>Based on area-level change interval</p>
-            </div>
-          </section>
-          <div className="work-grid">
-            <section className="map-panel">
-              <div className="panel-head">
-                <div>
-                  <div className="kicker">SPATIAL ANALYSIS</div>
-                  <h2>Change signal map</h2>
-                  <p>
-                    {site.region} <span>·</span>{" "}
-                    {fmt(result?.summary.sourcePixelCount || 0)} source pixels
-                    at 30 m · {fmt(result?.summary.cellCount || 0)} display
-                    blocks
-                  </p>
+                <div className="interval-track">
+                  <span className="zero-line" style={{ left: onScale(0) }} />
+                  <span
+                    className="interval-range"
+                    style={{
+                      left: onScale(interval[0]),
+                      width: `${((interval[1] - interval[0]) / (scaleMax - scaleMin)) * 100}%`,
+                    }}
+                  />
+                  <span
+                    className="interval-point"
+                    style={{ left: onScale(mean) }}
+                  />
                 </div>
+                <div className="interval-labels">
+                  <span style={{ left: onScale(interval[0]) }}>
+                    {visible ? sign(interval[0]) : "—"}
+                  </span>
+                  <span className="zero-label" style={{ left: onScale(0) }}>
+                    0 / NO CHANGE
+                  </span>
+                  <span style={{ left: onScale(interval[1]) }}>
+                    {visible ? sign(interval[1]) : "—"}
+                  </span>
+                </div>
+              </div>
+              <p className="figure-caption">
+                {confidence}% change interval · The vertical line marks zero
+                change.
+              </p>
+            </div>
+            <div
+              className={`finding-card ${visible?.summary.siteDirection ?? "uncertain"}`}
+            >
+              <span className="finding-label">CURRENT CONCLUSION</span>
+              <strong>
+                {visible
+                  ? verdict(visible.summary.siteDirection)
+                  : "Calculating…"}
+              </strong>
+              <p>
+                {visible
+                  ? visible.summary.siteDirection === "uncertain"
+                    ? "The area-wide interval crosses zero. Local changes exist, but the whole landscape has no clear direction under this setting."
+                    : `The ${confidence}% area-wide interval stays ${mean < 0 ? "below" : "above"} zero. This supports a net ${mean < 0 ? "loss" : "gain"} under the baseline error assumption.`
+                  : "Reading the raster stack…"}
+              </p>
+              <span className="finding-foot">
+                {visible
+                  ? `${fmt(visible.summary.areaHa)} ha assessed · ${fmt(visible.summary.sourcePixelCount)} source pixels`
+                  : ""}
+              </span>
+            </div>
+          </div>
+          <div className="trend-figure">
+            <div className="figure-top">
+              <span>CONTEXT / BIOMASS STOCK BY YEAR</span>
+              <span>AREA-WEIGHTED MEAN · t/ha</span>
+            </div>
+            <div className="trend-chart">
+              <TrendChart data={visible?.series ?? []} />
+            </div>
+          </div>
+        </section>
+        <section className="chapter map-chapter" id="map">
+          <div className="article-width">
+            <div className="chapter-heading">
+              <span className="chapter-index">02</span>
+              <div>
+                <span className="section-number">THE SPATIAL EVIDENCE</span>
+                <h2>
+                  The same difference looks different once uncertainty is
+                  applied.
+                </h2>
+              </div>
+            </div>
+            <p className="chapter-intro">
+              Switch between the raw biomass difference and the
+              confidence-filtered map. Select a block to inspect the numbers
+              behind its color.
+            </p>
+          </div>
+          <div className="map-workbench">
+            <div className="map-toolbar">
+              <div className="layer-switch" role="group" aria-label="Map layer">
                 <button
-                  className="small-btn"
-                  onClick={() => file.current?.click()}
+                  className={layer === "raw" ? "active" : ""}
+                  onClick={() => setLayer("raw")}
                 >
-                  <Upload size={15} /> Upload boundary
+                  Raw difference
+                </button>
+                <button
+                  className={layer === "classified" ? "active" : ""}
+                  onClick={() => setLayer("classified")}
+                >
+                  After uncertainty
+                </button>
+              </div>
+              <div className="map-actions">
+                <button onClick={() => fileInput.current?.click()}>
+                  <Upload size={15} /> Upload AOI
                 </button>
                 <input
-                  type="file"
+                  ref={fileInput}
                   hidden
-                  ref={file}
+                  type="file"
                   accept=".json,.geojson"
-                  onChange={(e) => {
-                    upload(e.target.files?.[0]);
-                    e.currentTarget.value = "";
+                  onChange={(event) => {
+                    upload(event.target.files?.[0]);
+                    event.currentTarget.value = "";
                   }}
                 />
+                <button
+                  disabled={!visible}
+                  onClick={() => visible && exportCsv(visible)}
+                >
+                  <Download size={15} /> Cell CSV
+                </button>
               </div>
+            </div>
+            <div className="map-body">
               <div className="map-frame">
                 <MapContainer
                   center={site.center as LatLngExpression}
@@ -572,7 +653,7 @@ export default function App() {
                   zoomControl={false}
                   className="map"
                 >
-                  <FlyTo site={site} />
+                  <FlyTo site={site} cells={visible?.cells} />
                   <ZoomControl position="bottomright" />
                   {base === "satellite" ? (
                     <TileLayer
@@ -585,24 +666,28 @@ export default function App() {
                       url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
                     />
                   )}
-                  {result?.cells.map((c) => (
+                  {visible?.cells.map((item) => (
                     <Rectangle
-                      key={c.id}
-                      bounds={c.bounds}
+                      key={item.id}
+                      bounds={item.bounds}
                       pathOptions={{
-                        color: selected === c.id ? "#fff" : cellColor(c, layer),
-                        weight: selected === c.id ? 2 : 0.35,
-                        fillColor: cellColor(c, layer),
+                        color:
+                          selectedId === item.id
+                            ? "#fff"
+                            : cellColor(item, layer),
+                        weight: selectedId === item.id ? 2.5 : 0.4,
+                        fillColor: cellColor(item, layer),
                         fillOpacity:
-                          layer === "signal" && c.classification === "uncertain"
+                          layer === "classified" &&
+                          item.classification === "uncertain"
                             ? 0.46
-                            : 0.77,
-                        opacity: selected === c.id ? 1 : 0.4,
+                            : 0.79,
+                        opacity: selectedId === item.id ? 1 : 0.5,
                       }}
-                      eventHandlers={{ click: () => setSelected(c.id) }}
+                      eventHandlers={{ click: () => setSelectedId(item.id) }}
                     >
                       <Tooltip direction="top">
-                        {sign(c.delta)} t/ha · {c.classification}
+                        {sign(item.delta)} t/ha · {item.classification}
                       </Tooltip>
                     </Rectangle>
                   ))}
@@ -610,7 +695,7 @@ export default function App() {
                     <Polygon
                       positions={boundary}
                       pathOptions={{
-                        color: "#ffffff",
+                        color: "#fff",
                         weight: 2.5,
                         fillOpacity: 0,
                         dashArray: "5 5",
@@ -618,8 +703,9 @@ export default function App() {
                     />
                   )}
                 </MapContainer>
-                <div className="map-status">
-                  <i /> {busy ? "PROCESSING" : "ANALYSIS READY"}
+                <div className="map-overlay">
+                  <span className="live-dot" />{" "}
+                  {busy ? "RECALCULATING" : "30 M SOURCE RASTERS"}
                 </div>
                 <button
                   className="base-switch"
@@ -627,398 +713,359 @@ export default function App() {
                     setBase(base === "satellite" ? "street" : "satellite")
                   }
                 >
-                  <Satellite size={15} />
+                  <Satellite size={15} />{" "}
                   {base === "satellite" ? "Satellite" : "Streets"}
-                  <ChevronDown size={13} />
                 </button>
-                <div className="coordinates">
-                  {Math.abs(site.center[0]).toFixed(3)}°{" "}
-                  {site.center[0] > 0 ? "N" : "S"} &nbsp;{" "}
-                  {Math.abs(site.center[1]).toFixed(3)}°{" "}
-                  {site.center[1] > 0 ? "E" : "W"}
-                </div>
               </div>
-              <div className="map-foot">
-                <div className="tabs">
-                  <button
-                    className={layer === "signal" ? "on" : ""}
-                    onClick={() => setLayer("signal")}
-                  >
-                    Significant change
-                  </button>
-                  <button
-                    className={layer === "raw" ? "on" : ""}
-                    onClick={() => setLayer("raw")}
-                  >
-                    Raw change
-                  </button>
-                  <button
-                    className={layer === "uncertainty" ? "on" : ""}
-                    onClick={() => setLayer("uncertainty")}
-                  >
-                    Uncertainty
-                  </button>
-                </div>
-                <div className="legend">
-                  {layer === "signal" ? (
-                    <>
-                      <span>
-                        <i className="loss" /> Loss
-                      </span>
-                      <span>
-                        <i className="uncertain" /> Uncertain
-                      </span>
-                      <span>
-                        <i className="gain" /> Gain
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className={"legend-gradient " + layer} />
-                      <span>
-                        {layer === "raw" ? "Loss → Gain" : "Lower → Higher SE"}
-                      </span>
-                    </>
-                  )}
-                </div>
-              </div>
-              {polygonName && (
-                <div className="boundary-chip">
-                  <FileJson size={14} />
-                  {polygonName}
-                  <button
-                    onClick={() => {
-                      setPolygon(null);
-                      setPolygonName("");
-                    }}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              )}
-            </section>
-            <div className="insights">
-              <section className="insight-card">
-                <div className="kicker">THE READOUT</div>
-                <h2>{cell ? "Cell inspection" : "What the map is saying"}</h2>
+              <aside className="map-inspector">
+                <span className="section-number">
+                  {cell ? "SELECTED BLOCK" : "MAP READOUT"}
+                </span>
                 {cell ? (
                   <>
+                    <h3>
+                      {sign(cell.delta)} <small>t/ha</small>
+                    </h3>
+                    <span
+                      className={`classification-pill ${cell.classification}`}
+                    >
+                      {cell.classification === "uncertain"
+                        ? "Inconclusive"
+                        : cell.classification}
+                    </span>
                     <p>
-                      Selected cell at {cell.lat.toFixed(3)}°,{" "}
-                      {cell.lon.toFixed(3)}°. Estimated change is{" "}
-                      <b>{sign(cell.delta)} t/ha</b> with a change standard
-                      error of {fmt(cell.changeSe, 1)} t/ha.
+                      This display block changed from {fmt(cell.startStock, 1)}{" "}
+                      to {fmt(cell.endStock, 1)} t/ha. Its change standard error
+                      is {fmt(cell.changeSe, 1)} t/ha.
                     </p>
-                    <div className="cell-row">
-                      <span>CLASSIFICATION</span>
-                      <strong className={cell.classification}>
-                        {cell.classification}
-                      </strong>
-                    </div>
-                    <div className="cell-row">
-                      <span>START STOCK</span>
-                      <strong>{fmt(cell.startStock, 1)} t/ha</strong>
-                    </div>
-                    <div className="cell-row">
-                      <span>END STOCK</span>
-                      <strong>{fmt(cell.endStock, 1)} t/ha</strong>
-                    </div>
-                    <div className="cell-row">
-                      <span>STANDARDIZED CHANGE</span>
-                      <strong>{sign(cell.score, 2)}σ</strong>
-                    </div>
+                    <dl>
+                      <div>
+                        <dt>AREA</dt>
+                        <dd>{fmt(cell.areaHa, 1)} ha</dd>
+                      </div>
+                      <div>
+                        <dt>STANDARDIZED CHANGE</dt>
+                        <dd>{sign(cell.score, 2)}σ</dd>
+                      </div>
+                      <div>
+                        <dt>COORDINATES</dt>
+                        <dd>
+                          {cell.lat.toFixed(3)}°, {cell.lon.toFixed(3)}°
+                        </dd>
+                      </div>
+                    </dl>
                     <button
-                      className="text-btn"
-                      onClick={() => setSelected(null)}
+                      className="text-action"
+                      onClick={() => setSelectedId(null)}
                     >
                       Clear selection <X size={14} />
                     </button>
                   </>
                 ) : (
                   <>
+                    <h3>
+                      {layer === "raw"
+                        ? "Measured difference"
+                        : "Supported change"}
+                    </h3>
                     <p>
-                      {site.story} Colored cells show where the estimated change
-                      clears the chosen confidence threshold.
+                      {layer === "raw"
+                        ? "Every block is colored by estimated direction and size. This view alone does not show which changes clear the uncertainty threshold."
+                        : "Only blocks whose change clears the chosen confidence threshold receive a gain or loss classification."}
                     </p>
-                    <div className="class-list">
-                      <div>
-                        <i className="gain">
-                          <ArrowUpRight size={20} />
-                        </i>
-                        <span>
-                          <strong>
-                            {result
-                              ? fmt(result.summary.classAreaHa.gain)
-                              : "—"}{" "}
-                            ha
-                          </strong>
-                          <small>Significant biomass gain</small>
-                        </span>
-                      </div>
-                      <div>
-                        <i className="loss">
-                          <ArrowDownRight size={20} />
-                        </i>
-                        <span>
-                          <strong>
-                            {result
-                              ? fmt(result.summary.classAreaHa.loss)
-                              : "—"}{" "}
-                            ha
-                          </strong>
-                          <small>Significant biomass loss</small>
-                        </span>
-                      </div>
-                      <div>
-                        <i className="uncertain">≈</i>
-                        <span>
-                          <strong>
-                            {result
-                              ? fmt(result.summary.classAreaHa.uncertain)
-                              : "—"}{" "}
-                            ha
-                          </strong>
-                          <small>Direction remains uncertain</small>
-                        </span>
-                      </div>
+                    <div className="area-bars">
+                      {areaRows.map((row) => (
+                        <div key={row.kind}>
+                          <span>{row.label}</span>
+                          <strong>{visible ? fmt(row.area) : "—"} ha</strong>
+                          <div>
+                            <i
+                              className={row.kind}
+                              style={{
+                                width: visible
+                                  ? `${(row.area / visible.summary.areaHa) * 100}%`
+                                  : "0%",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div className="tip">
-                      <CircleHelp size={16} /> Click any cell to inspect its
-                      estimate and uncertainty.
-                    </div>
+                    <span className="inspector-hint">
+                      Click a map block to inspect its estimate.
+                    </span>
                   </>
                 )}
-              </section>
-              <section className="method-card">
-                <div className="method-symbol">✳</div>
-                <div>
-                  <strong>
-                    Built to show the decision, not just the number.
-                  </strong>
-                  <p>
-                    Adjacent cells and repeated measurements are correlated.
-                    This sample model accounts for both.
-                  </p>
-                  <button onClick={() => setNotes(true)}>
-                    View method notes <ArrowRight size={14} />
-                  </button>
-                </div>
-              </section>
+              </aside>
             </div>
-          </div>
-          <section className="audit-card">
-            <div className="audit-head">
-              <div>
-                <div className="kicker">DECISION STABILITY</div>
-                <h2>Does the conclusion survive different assumptions?</h2>
-                <p>
-                  Re-run the same raster difference across confidence thresholds
-                  and paired-error correlations.
-                </p>
+            <div className="map-footer">
+              <div className="map-legend">
+                {layer === "classified" ? (
+                  <>
+                    <span>
+                      <i className="loss" /> Loss
+                    </span>
+                    <span>
+                      <i className="uncertain" /> Unresolved
+                    </span>
+                    <span>
+                      <i className="gain" /> Gain
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      <i className="loss" /> Larger loss
+                    </span>
+                    <span>
+                      <i className="uncertain" /> Near zero
+                    </span>
+                    <span>
+                      <i className="gain" /> Larger gain
+                    </span>
+                  </>
+                )}
               </div>
-              <span className="audit-badge">9 SCENARIOS</span>
+              <span>
+                {fmt(visible?.summary.cellCount ?? 0)} display blocks ·{" "}
+                {fmt(visible?.summary.sourcePixelCount ?? 0)} source pixels
+              </span>
             </div>
-            <div className="audit-grid">
-              <div className="audit-table">
-                <div className="audit-row audit-labels">
-                  <span>TEMPORAL CORRELATION</span>
-                  <span>80% CONFIDENCE</span>
-                  <span>90% CONFIDENCE</span>
-                  <span>95% CONFIDENCE</span>
-                </div>
-                {[0, 0.45, 0.8].map((rho) => (
-                  <div className="audit-row" key={rho}>
-                    <strong>
-                      {rho === 0
-                        ? "Independent years"
-                        : rho === 0.45
-                          ? "Base assumption"
-                          : "Strongly paired"}{" "}
-                      <small>ρ = {rho.toFixed(2)}</small>
-                    </strong>
-                    {[80, 90, 95].map((level) => {
-                      const a = result?.decisionAudit.find(
-                        (x) =>
-                          x.temporalCorrelation === rho &&
-                          x.confidence === level,
-                      );
-                      return (
-                        <div
-                          className={
-                            "audit-outcome " + (a?.siteDirection || "")
-                          }
-                          key={level}
-                        >
-                          <b>
-                            {a
-                              ? a.siteDirection === "uncertain"
-                                ? "Inconclusive"
-                                : "Net " + a.siteDirection
-                              : "—"}
-                          </b>
-                          <small>
-                            {a
-                              ? fmt(a.classifiedAreaHa) + " ha classified"
-                              : "Loading"}
-                          </small>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-              <div className="audit-explain">
-                <div className="audit-symbol">↗</div>
-                <strong>
-                  {result
-                    ? auditAgree === 9
-                      ? "Stable verdict"
-                      : 9 -
-                        auditAgree +
-                        (9 - auditAgree === 1
-                          ? " setting changes"
-                          : " settings change") +
-                        " the verdict"
-                    : "Checking stability"}
-                </strong>
-                <p>
-                  {result
-                    ? auditAgree +
-                      "/9 scenarios agree · " +
-                      fmt(Math.min(...auditAreas)) +
-                      "–" +
-                      fmt(Math.max(...auditAreas)) +
-                      " ha classified"
-                    : "Comparing scenarios..."}
-                </p>
-                <button onClick={() => setNotes(true)}>
-                  See assumptions <ArrowRight size={14} />
+            {polygonName && (
+              <div className="boundary-chip">
+                Clipped to {polygonName}
+                <button
+                  onClick={() => {
+                    setPolygon(null);
+                    setPolygonName("");
+                  }}
+                  aria-label="Remove boundary"
+                >
+                  <X size={14} />
                 </button>
               </div>
+            )}
+          </div>
+        </section>
+        <section
+          className="chapter article-width sensitivity-chapter"
+          id="sensitivity"
+        >
+          <div className="chapter-heading">
+            <span className="chapter-index">03</span>
+            <div>
+              <span className="section-number">THE DECISION CHECK</span>
+              <h2>Would you make the same call with different assumptions?</h2>
             </div>
-          </section>
-          <div className="bottom-grid">
-            <section className="chart-card">
-              <div className="panel-head">
-                <div>
-                  <div className="kicker">TEMPORAL VIEW</div>
-                  <h2>Biomass through time</h2>
-                  <p>Area-weighted mean stock · 2018–2025 · t/ha</p>
-                </div>
-                <span className="chart-badge">
-                  <i /> Sample time series
-                </span>
+          </div>
+          <p className="chapter-intro">
+            Each square re-runs the same raster difference. Columns change the
+            confidence threshold; rows change how strongly errors in the two
+            years are paired. Select a square to inspect its result.
+          </p>
+          <div className="audit-layout">
+            <div className="scenario-matrix">
+              <div className="matrix-head">
+                <span>TEMPORAL PAIRING</span>
+                {[80, 90, 95].map((level) => (
+                  <span key={level}>{level}% confidence</span>
+                ))}
               </div>
-              <div className="chart">
-                <TrendChart data={result?.series || []} />
-              </div>
-            </section>
-            <section className="story-card">
-              <div className="kicker">ENGINEERING PATH</div>
-              <h2>From raster to decision.</h2>
-              <div className="engineering-list">
+              {[0, 0.45, 0.8].map((rho) => (
+                <div className="matrix-row" key={rho}>
+                  <div className="row-label">
+                    <strong>{pairing(rho)}</strong>
+                    <small>ρ = {rho.toFixed(2)}</small>
+                  </div>
+                  {[80, 90, 95].map((level) => {
+                    const item = visible?.decisionAudit.find(
+                      (entry) =>
+                        entry.temporalCorrelation === rho &&
+                        entry.confidence === level,
+                    );
+                    const focused = focus[0] === rho && focus[1] === level;
+                    return (
+                      <button
+                        key={level}
+                        className={`scenario ${item?.siteDirection ?? "uncertain"} ${focused ? "focused" : ""}`}
+                        onClick={() => setFocus([rho, level])}
+                        aria-pressed={focused}
+                      >
+                        <span>{item ? verdict(item.siteDirection) : "—"}</span>
+                        <small>
+                          {item
+                            ? `${fmt(item.classifiedAreaHa)} ha classified`
+                            : "Loading"}
+                        </small>
+                        {rho === 0.45 && level === confidence && (
+                          <i title="Current map setting" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+            <div className="scenario-detail">
+              <span className="section-number">SELECTED SCENARIO</span>
+              <h3>
+                {scenario ? verdict(scenario.siteDirection) : "Calculating…"}
+              </h3>
+              <p>
+                {pairing(focus[0])} years · {focus[1]}% confidence
+              </p>
+              <dl>
                 <div>
-                  <span>01</span>
-                  <strong>Aligned 30 m GeoTIFFs</strong>
-                  <small>stock + standard error · 8 years</small>
+                  <dt>CHANGE INTERVAL</dt>
+                  <dd>
+                    {scenario
+                      ? `${sign(scenario.interval[0])} to ${sign(scenario.interval[1])} t/ha`
+                      : "—"}
+                  </dd>
                 </div>
                 <div>
-                  <span>02</span>
-                  <strong>Python analysis API</strong>
-                  <small>AOI mask · covariance · validation</small>
+                  <dt>CLASSIFIED AREA</dt>
+                  <dd>
+                    {scenario ? `${fmt(scenario.classifiedAreaHa)} ha` : "—"}
+                  </dd>
                 </div>
-                <div>
-                  <span>03</span>
-                  <strong>Reviewable output</strong>
-                  <small>map · audit · cell CSV</small>
+              </dl>
+              {scenario && baseline && (
+                <div className="scenario-note">
+                  {scenario.siteDirection === baseline.siteDirection
+                    ? "The direction agrees with the current map setting."
+                    : "The conclusion changes under this assumption. That is the decision risk this check exposes."}
                 </div>
-              </div>
+              )}
+            </div>
+          </div>
+          <p className="audit-takeaway">
+            {visible
+              ? agree === 9
+                ? "All nine settings support the same area-wide conclusion."
+                : `${9 - agree} of 9 settings change the area-wide conclusion. The classified map area also shifts with the uncertainty assumptions.`
+              : "Comparing nine settings…"}
+          </p>
+        </section>
+        <section className="closing article-width">
+          <div>
+            <span className="section-number">WHAT WAS BUILT</span>
+            <h2>From raster files to a reviewable decision.</h2>
+            <p>
+              The pipeline validates annual 30 m GeoTIFFs, clips a GeoJSON area,
+              propagates paired uncertainty, and returns both map blocks and
+              area-wide conclusions. This case study uses deterministic
+              synthetic data so the workflow can be inspected and reproduced.
+            </p>
+            <div className="closing-actions">
+              <button onClick={() => setNotes(true)}>
+                <Info size={16} /> Method & limitations
+              </button>
               <a
                 href="https://github.com/AndrewGordienko/forest-signal"
                 target="_blank"
                 rel="noreferrer"
               >
-                View source and tests <ArrowRight size={15} />
+                Inspect the code <ArrowRight size={16} />
               </a>
-            </section>
+            </div>
           </div>
-          <footer>
-            FIELDNOTE / FOREST SIGNAL{" "}
-            <span>
-              Independent portfolio demonstration · Synthetic biomass data ·
-              2026
-            </span>
-          </footer>
-        </div>
+          <div className="pipeline">
+            <div>
+              <span>01</span>
+              <strong>Validate</strong>
+              <small>stock + standard error rasters</small>
+            </div>
+            <div>
+              <span>02</span>
+              <strong>Compute</strong>
+              <small>AOI mask + paired covariance</small>
+            </div>
+            <div>
+              <span>03</span>
+              <strong>Review</strong>
+              <small>map + sensitivity + CSV</small>
+            </div>
+          </div>
+        </section>
       </main>
+      <footer className="site-footer">
+        <span>FOREST SIGNAL / ANDREW GORDIENKO</span>
+        <span>
+          Independent portfolio project · Synthetic data · No carbon accounting
+          claims
+        </span>
+        <a href="#top">Back to top ↑</a>
+      </footer>
       {notes && (
         <div className="modal-backdrop" onClick={() => setNotes(false)}>
           <div
             className="modal"
             role="dialog"
             aria-modal="true"
-            onClick={(e) => e.stopPropagation()}
+            aria-label="Method and limitations"
+            onClick={(event) => event.stopPropagation()}
           >
-            <button className="modal-x" onClick={() => setNotes(false)}>
+            <button
+              className="modal-close"
+              onClick={() => setNotes(false)}
+              aria-label="Close"
+            >
               <X size={20} />
             </button>
-            <div className="eyebrow">
-              <i /> METHOD NOTES
-            </div>
-            <h2>A transparent sample pipeline.</h2>
+            <span className="section-number">METHOD & LIMITATIONS</span>
+            <h2>What the analysis computes</h2>
             <p>
-              Every biomass value is deterministically generated for this
-              independent portfolio demo. It does not use Chloris data,
-              reproduce their models, or support real carbon claims.
+              All displayed biomass values are generated fixtures. The demo does
+              not use Chloris data or reproduce Chloris models.
             </p>
             <div className="method-list">
               <div>
                 <b>01</b>
                 <span>
-                  <strong>Paired observations</strong>
+                  <strong>Paired change</strong>
                   <small>
-                    Each cell has synthetic stock and standard error for each
-                    year. Change is later minus earlier stock.
+                    For each source pixel, change is later stock minus earlier
+                    stock. Change variance is SE₁² + SE₂² − 2ρSE₁SE₂.
                   </small>
                 </span>
               </div>
               <div>
                 <b>02</b>
                 <span>
-                  <strong>Change uncertainty</strong>
+                  <strong>Spatial aggregation</strong>
                   <small>
-                    The API propagates error from both years with assumed
-                    temporal correlation of 0.45. The confidence control changes
-                    the classification threshold.
+                    A 28% shared regional variance component prevents
+                    neighboring pixels from appearing fully independent. The
+                    baseline temporal correlation is ρ = 0.45.
                   </small>
                 </span>
               </div>
               <div>
                 <b>03</b>
                 <span>
-                  <strong>Area uncertainty</strong>
+                  <strong>Classification</strong>
                   <small>
-                    A 28% shared regional error component prevents adjacent
-                    cells from falsely behaving as independent measurements.
-                    Production use would require calibrated covariance and
-                    validation.
+                    A gain or loss clears the selected normal confidence
+                    threshold. The nine scenario check varies confidence and
+                    temporal correlation.
                   </small>
                 </span>
               </div>
               <div>
                 <b>04</b>
                 <span>
-                  <strong>Geospatial delivery</strong>
+                  <strong>Production boundary</strong>
                   <small>
-                    {STATIC_MODE
-                      ? "The public preview replays GeoTIFF-derived data in the browser. The repository contains the Python raster API."
-                      : "The Python API clips GeoJSON areas, aggregates raster statistics, and returns inspectable cells."}
+                    Real use requires calibrated covariance, independent
+                    reference plots or LiDAR, coverage tests across ecosystems,
+                    and review of spatial autocorrelation.
                   </small>
                 </span>
               </div>
             </div>
-            <button className="primary" onClick={() => setNotes(false)}>
-              <Check size={17} /> Got it
+            <button className="modal-done" onClick={() => setNotes(false)}>
+              Close notes
             </button>
           </div>
         </div>
